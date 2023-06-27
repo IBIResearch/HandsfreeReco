@@ -4,6 +4,7 @@ This folder contains example code for applying a reconstruction-parameter free M
 Given is an example on dilution series of a phantom of a realistic rat-kidney (example.jl).
 
 The method as well as the data is described in the associated publication
+
 K.Scheffler, M. Boberg, and T. Knopp. *(under review)*. Solving the MPI Reconstruction Problem with automatically tuned regularization parameters.
 
 
