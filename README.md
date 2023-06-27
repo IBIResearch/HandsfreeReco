@@ -1,4 +1,4 @@
-# HandsfreeReco
+# MPI Reconstruction using automatically tuned regularization parameters - Example
 
 This folder contains example code for applying a reconstruction-parameter free MPI reconstruction based on the kaczmarz algorithm.
 Given is an example on dilution series of a phantom of a realistic rat-kidney (example.jl).
