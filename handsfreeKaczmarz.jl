@@ -22,10 +22,11 @@ mutable struct handsfreeKaczmarz{matT,T,U}
     resid::Vector{U}
     curvature::Vector{U}
     iterbounds::Tuple{Int64,Int64}
+    stoppingParas::Tuple{Float64,Float64}
     expected_iters::Int64
     wanted_iters::Int64
     minFreq::Float64
-    finalfreq::Vector{Int64}
+    finalfreq::Matrix{Float64}
     recChannels::Vector{Int64}
     startλ::Float64
     SNRbounds::Tuple{Float64,Float64}
@@ -41,6 +42,7 @@ function handsfreeKaczmarz(S, finalfreq;
     weights=nothing,
     shuffleRows::Bool=false,
     iterbounds::Tuple{Int64,Int64}=(1,50),
+    stoppingParas::Tuple{Float64,Float64}=(0.25,2.0),
     expected_iters::Int64=0,
     wanted_iters::Int64=0,
     recChannels::Vector{Int64}=[1,2,3],
@@ -89,7 +91,7 @@ function handsfreeKaczmarz(S, finalfreq;
     resid = zeros(eltype(T),max_iter)
     curvature = zeros(eltype(T),max_iter)
   
-    return handsfreeKaczmarz(S,u,reg,denom,rowindex,rowIndexCycle,cl,vl,εw,τl,αl,T.(w),norm_cl,resid,curvature,iterbounds,expected_iters,wanted_iters,minFreq,finalfreq,recChannels,startλ,SNRbounds,regMatrix)    
+    return handsfreeKaczmarz(S,u,reg,denom,rowindex,rowIndexCycle,cl,vl,εw,τl,αl,T.(w),norm_cl,resid,curvature,iterbounds,stoppingParas,expected_iters,wanted_iters,minFreq,finalfreq,recChannels,startλ,SNRbounds,regMatrix)    
 end
 
 ###                                        ###
@@ -161,9 +163,13 @@ function iterate(solver::handsfreeKaczmarz, iteration::Int=1)
 
   ## determine frequency selection with SNRtresh of this iteration 
   threshl = [j > solver.SNRbounds[2] ? T(j) : T(solver.SNRbounds[2]) for j in (solver.SNRbounds[1]) / (1 + (0.28 * iteration - 0.28)^2)][1]
-  freql = filterFrequencies(bSF, minFreq=solver.minFreq, SNRThresh=threshl, recChannels=solver.recChannels)
+
+### Fettes Problem!!! TODO: filterfreqs brauch MPIFile. besser: SNRs direkt dabei haben und hier aussortieren  
+
+  #freql = filterFrequencies(bSF, minFreq=solver.minFreq, SNRThresh=threshl, recChannels=solver.recChannels)
    # indexl as a subset of freq (base frequencies with SNRthresh = 1.5)
-  indexl = [findfirst(f->f==freql[i],solver.finalfreq) for i=1:length(freql)]
+  indexl = sort(sortperm(solver.finalfreq[:,2])[findfirst(f->f>threshl,sort(solver.finalfreq[:,2])):end])
+#[findfirst(f->f==freql[i],solver.finalfreq[:,1]) for i=1:length(freql)]
 
   ## get kaczmarz denomenetor and weighted lambda for lambda and SNRthresh of this iteration
   denoml,ɛwl = getkaczmarz_stuff(solver,indexl,iteration)
@@ -212,7 +218,7 @@ function done(solver::handsfreeKaczmarz,iteration::Int)
           solver.wanted_iters = iteration+2
       end
       return true
-  elseif iteration >= solver.iterbounds[1] && solver.curvature[iteration] > 0.25 * solver.norm_cl[1] && solver.curvature[iteration-1]*2 < solver.curvature[iteration] #> solver.curvature[iteration]
+  elseif iteration >= 2 && iteration >= solver.iterbounds[1] &&  solver.curvature[iteration] > solver.stoppingParas[1] * solver.norm_cl[1] && abs(solver.curvature[iteration-1]*solver.stoppingParas[2]) < abs(solver.curvature[iteration])
       if iteration >= round(Int,solver.expected_iters*1/2)
           tmp=solver.expected_iters
           @info "Stopped after $iteration iterations. Expected $tmp iterations."
@@ -293,63 +299,4 @@ function handsfreekaczmarz_update!(B::Transpose{T,S}, x::Vector,
   for n=A.colptr[k]:N-1+A.colptr[k]
       @inbounds x[A.rowval[n]] += beta*conj(A.nzval[n])
   end
-end
-
-# kaczmarz_update! with manual simd optimization
-for (T,W, WS,shufflevectorMask,vσ) in [(Float32,:WF32,:WF32S,:shufflevectorMaskF32,:vσF32),(Float64,:WF64,:WF64S,:shufflevectorMaskF64,:vσF64)]
-  eval(quote
-      const $WS = VectorizationBase.pick_vector_width($T)
-      const $W = Int(VectorizationBase.pick_vector_width($T))
-      const $shufflevectorMask = Val(ntuple(k -> iseven(k-1) ? k : k-2, $W))
-      const $vσ = Vec(ntuple(k -> (-1f0)^(k+1),$W)...)
-      function kokaczmarz_update!(A::Transpose{Complex{$T},S}, b::Vector{Complex{$T}}, k::Integer, beta::Complex{$T}) where {S<:DenseMatrix}
-          b = reinterpret($T,b)
-          A = reinterpret($T,A.parent)
-
-          N = length(b)
-          Nrep, Nrem = divrem(N,4*$W) # main loop
-          Mrep, Mrem = divrem(Nrem,$W) # last iterations
-          idx = MM{$W}(1)
-          iOffset = 4*$W
-
-          vβr = vbroadcast($WS, beta.re) * $vσ # vector containing (βᵣ,-βᵣ,βᵣ,-βᵣ,...)
-          vβi = vbroadcast($WS, beta.im) # vector containing (βᵢ,βᵢ,βᵢ,βᵢ,...)
-
-          GC.@preserve b A begin # protect A and y from GC
-              vptrA = stridedpointer(A)
-              vptrb = stridedpointer(b)
-              for _ = 1:Nrep
-                  Base.Cartesian.@nexprs 4 i -> vb_i = vload(vptrb, ($W*(i-1) + idx,))
-                  Base.Cartesian.@nexprs 4 i -> va_i = vload(vptrA, ($W*(i-1) + idx,k))
-                  Base.Cartesian.@nexprs 4 i -> begin
-                      vb_i = muladd(va_i, vβr, vb_i)
-                      va_i = shufflevector(va_i, $shufflevectorMask)
-                      vb_i = muladd(va_i, vβi, vb_i)
-                    vstore!(vptrb, vb_i, ($W*(i-1) + idx,))
-                  end
-                  idx += iOffset
-              end
-
-              for _ = 1:Mrep
-            vb = vload(vptrb, (idx,))
-            va = vload(vptrA, (idx,k))
-                  vb = muladd(va, vβr, vb)
-                  va = shufflevector(va, $shufflevectorMask)
-                  vb = muladd(va, vβi, vb)
-              vstore!(vptrb, vb, (idx,))
-                  idx += $W
-              end
-
-              if Mrem!=0
-                  vloadMask = VectorizationBase.mask($T, Mrem)
-                  vb = vload(vptrb, (idx,), vloadMask)
-                  va = vload(vptrA, (idx,k), vloadMask)
-                  vb = muladd(va, vβr, vb)
-                  va = shufflevector(va, $shufflevectorMask)
-                  vb = muladd(va, vβi, vb)
-                  vstore!(vptrb, vb, (idx,), vloadMask)
-              end
-          end # GC.@preserve
-      end
-  end)
 end

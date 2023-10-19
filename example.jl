@@ -33,8 +33,12 @@ bgframes=1:1000
 
 # get Noise Level and System Matrix manually to speed up reconstruction 
 NoiseLevel=getNoiseLevel(bEmpty,bgframes,1:3)
-finalfreq = filterFrequencies(bSF, minFreq=80e3, SNRThresh=0.00031*NoiseLevel, recChannels = [1,2,3])
-SM, grid = getSF(bSF, finalfreq, nothing, "kaczmarz"; bgcorrection=true)
+allfreqs = filterFrequencies(bSF, minFreq=80e3, SNRThresh=0.00031*NoiseLevel, recChannels = [1,2,3])
+SM, grid = getSF(bSF, allfreqs, nothing, "kaczmarz"; bgcorrection=true)
+
+# We need to give the SNR-values next to frequencies in low-level reconstruction
+allSNRs = getSNRs(bSF,allfreqs)
+finalfreq = hcat(allfreqs,allSNRs)
 
 c=[]
 it=[]

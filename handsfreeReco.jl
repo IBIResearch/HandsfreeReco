@@ -3,6 +3,23 @@ using MPIMeasurements, MPIReco
 include("handsfreeKaczmarz.jl")
 
 """
+Returns the SNRvalues for the given frequency selection.
+
+    SNRs = getSNRs(f:::MPIFile,freqs::Vector{Int64})
+"""
+function getSNRs(f::MPIFile,freqs::Vector{Int64})
+    nFreq = rxNumFrequencies(f, true)
+    nReceivers = rxNumChannels(f)
+    SNR = zeros(nFreq, nReceivers)
+    idx = measIsFrequencySelection(f) ? measFrequencySelection(f) : idx = 1:nFreq
+
+    SNRAll = calibSNR(f)
+    if SNRAll != nothing
+    SNR[idx,:] = SNRAll[:,:,1]
+    end
+    return vec(SNR)[freqs]
+end
+"""
 Calculates a noise level from empty measurement `bEmpty`.
 
     NoiseLevel = getNoiseLevel(bEmpty,bgframes,channels)
@@ -67,12 +84,15 @@ function handsfreeReco(bSF::MPIFile, bMeas::MPIFile, startλ::AbstractFloat, SNR
         )
 
     # final (biggest) frequency selection
-    finalfreq = filterFrequencies(bSF, minFreq=minFreq, SNRThresh=SNRbounds[2], recChannels = recChannels)
+    allfreqs = filterFrequencies(bSF, minFreq=minFreq, SNRThresh=SNRbounds[2], recChannels = recChannels)
+    allSNRs = getSNRs(bSF,allfreqs)
+
+    finalfreq = hcat(allfreqs,allSNRs)
 
     bgCorrection = bEmpty !== nothing ? true : false
 
     # load system matrix and grid
-    SM, grid = getSF(bSF, finalfreq, nothing, "kaczmarz"; bgcorrection=bgCorrection)
+    SM, grid = getSF(bSF, Int.(finalfreq[:,1]), nothing, "kaczmarz"; bgcorrection=bgCorrection)
 
     return handsfreeReco(SM, bMeas, finalfreq; frames = frames, nAverages = nAverages, bEmpty = bEmpty,
     recChannels = recChannels, minFreq = minFreq, startλ = startλ, SNRbounds = SNRbounds, kargs...)
@@ -83,36 +103,55 @@ Low-Level hands-free reconstruction with already given system matrix and frequen
 
     c,it,curv = handsfreeReco(SM::Transpose{ComplexF32, Matrix{ComplexF32}}, bMeas::MPIFile, finalfreq::Vector{Int64}; kargs...)
 """
-function handsfreeReco(SM::Transpose{ComplexF32, Matrix{ComplexF32}}, bMeas::MPIFile, finalfreq::Vector{Int64}; 
-    frames = 1:acqNumFrames(bMeas),
-    nAverages = 1,
-    numAverages=nAverages,
-    bEmpty = nothing,
-    bgFrames = 1,
-    recChannels = [1,2,3],
+function handsfreeReco(SM::Transpose{ComplexF32, Matrix{ComplexF32}}, bMeas::MPIFile, finalfreq::Matrix{Float64}; 
+        frames = 1:acqNumFrames(bMeas),
+        nAverages = 1,
+        numAverages=nAverages,
+        bEmpty = nothing,
+        bgFrames = 1,
+        recChannels = [1,2,3],
+        iterBounds = (1,25),
+        stoppingParas = (0.25,2.0),
+        equalizeIters = false,
+        flattenIters = false,    
+        startλ = 5.0,
+        SNRbounds = (60.0,1.5),
+        spectralLeakageCorrection=true,
+        bgCorrectionInternal=false,
+        numPeriodAverages=1,
+        numPeriodGrouping=1
+    )
+
+    bgCorrection = bEmpty !== nothing ? true : false
+
+    # load measurements
+    u = getMeasurementsFD(bMeas,frequencies=Int.(finalfreq[:,1]),frames=frames,numAverages=numAverages,
+                            spectralLeakageCorrection=spectralLeakageCorrection,bgCorrection=bgCorrectionInternal,
+                            numPeriodAverages=numPeriodAverages,numPeriodGrouping=numPeriodGrouping)
+    if bgCorrection
+    uEmpty = getMeasurementsFD(bEmpty,frequencies=Int.(finalfreq[:,1]),frames=bgFrames,numAverages=length(bgFrames),
+                                spectralLeakageCorrection=spectralLeakageCorrection,bgCorrection=bgCorrectionInternal,
+                                numPeriodAverages=numPeriodAverages,numPeriodGrouping=numPeriodGrouping)
+    u .-= uEmpty
+    end
+    return handsfreeReco(SM, u, finalfreq; iterBounds=iterBounds, stoppingParas = stoppingParas, equalizeIters=equalizeIters, flattenIters=flattenIters, recChannels = recChannels, startλ = startλ, SNRbounds = SNRbounds)
+
+end
+"""
+Lowest-Level hands-free reconstruction with already given system matrix, measurement and frequency selection.
+
+    c,it,curv = handsfreeReco(SM::Transpose{ComplexF32, Matrix{ComplexF32}}, u::Vector{ComplexF32}, finalfreq::Vector{Int64}; kargs...)
+"""
+function handsfreeReco(SM::Transpose{ComplexF32, Matrix{ComplexF32}}, u::AbstractArray{ComplexF32}, finalfreq::Matrix{Float64}; 
     iterBounds = (1,25),
+    stoppingParas = (0.25,2.0),
     equalizeIters = false,
     flattenIters = false,    
     startλ = 5.0,
     SNRbounds = (60.0,1.5),
-    spectralLeakageCorrection=true,
-    bgCorrectionInternal=false,
-    numPeriodAverages=1,
-    numPeriodGrouping=1
+    recChannels = [1,2,3]
 )
 
-bgCorrection = bEmpty !== nothing ? true : false
-
-# load measurements
-u = getMeasurementsFD(bMeas,frequencies=finalfreq,frames=frames,numAverages=numAverages,
-                        spectralLeakageCorrection=spectralLeakageCorrection,bgCorrection=bgCorrectionInternal,
-                        numPeriodAverages=numPeriodAverages,numPeriodGrouping=numPeriodGrouping)
-if bgCorrection
-uEmpty = getMeasurementsFD(bEmpty,frequencies=finalfreq,frames=bgFrames,numAverages=length(bgFrames),
-                            spectralLeakageCorrection=spectralLeakageCorrection,bgCorrection=bgCorrectionInternal,
-                            numPeriodAverages=numPeriodAverages,numPeriodGrouping=numPeriodGrouping)
-u .-= uEmpty
-end
 
 ### --------------- ###
 ### reconstructrion ###
@@ -121,7 +160,7 @@ end
 # setup
 progress = nothing
 M,N = size(SM)
-L = size(u)[end]
+L = length(size(u)) > 1 ? size(u)[end] : 1
 u = reshape(u, M, L)
 c = zeros(N,L)
 it = zeros(L)
@@ -129,7 +168,7 @@ w_it = zeros(L)
 curv = [zeros(iterBounds[2]) for i=1:L]
 
 # build up solver
-solv = handsfreeKaczmarz(SM, finalfreq; iterbounds=iterBounds, recChannels=recChannels, SNRbounds=SNRbounds, startλ=startλ)
+solv = handsfreeKaczmarz(SM, finalfreq; iterbounds=iterBounds, stoppingParas=stoppingParas, recChannels=recChannels, SNRbounds=SNRbounds, startλ=startλ)
 
 progress===nothing ? p = Progress(L, 1, "Reconstructing data...") : p = progress
 
