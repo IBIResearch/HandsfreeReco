@@ -5,7 +5,7 @@ Given is an example on dilution series of a phantom of a realistic rat-kidney (e
 
 The method as well as the data is described in the associated publication
 
-K.Scheffler, M. Boberg, and T. Knopp. Solving the MPI Reconstruction Problem with automatically tuned regularization parameters. Physics in Medicine & Biology. https://doi.org/10.1088/1361-6560/ad2231
+Konrad Scheffler et al 2024 Phys. Med. Biol. 69 045024 https://doi.org/10.1088/1361-6560/ad2231
 
 
 ## Installation
